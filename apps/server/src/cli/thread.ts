@@ -1052,7 +1052,7 @@ const threadAttachCommand = Command.make("attach", {
     Flag.withDescription("Configured ACP provider instance ID."),
   ),
   project: Argument.String("project").pipe(
-    Argument.withDescription("Project ID or directory. Default: current directory."),
+    Argument.withDescription("Project ID or directory for a first import. Default: No project."),
     Argument.optional,
   ),
   json: jsonFlag,
@@ -1062,13 +1062,12 @@ const threadAttachCommand = Command.make("attach", {
     withThreadTools(
       flags,
       Effect.fnUntraced(function* (tools, origin) {
-        const project = yield* resolveProject(
-          tools,
-          Option.getOrElse(flags.project, () => "."),
-        );
+        const project = Option.isSome(flags.project)
+          ? yield* resolveProject(tools, flags.project.value)
+          : undefined;
         const input = yield* decodeAcpImportInput({
           instanceId: flags.provider,
-          projectId: project.id,
+          ...(project === undefined ? {} : { projectId: project.id }),
           sessionId: flags.sessionId,
           requireNativeHistory: true,
         }).pipe(

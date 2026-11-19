@@ -2343,6 +2343,7 @@ it.effect.each([
 const acpDriver = ProviderDriverKind.make("acpRegistry");
 const acpInstanceId = ProviderInstanceId.make("acpRegistry_test");
 const acpProjectId = ProjectId.make("project:acp");
+const noProjectId = ProjectId.make("project:no-project");
 const acpThreadId = (sessionId: string) =>
   IdAllocator.deriveThreadFromProviderThread({
     driver: acpDriver,
@@ -2370,7 +2371,12 @@ const acpStores = Layer.mergeAll(EventStore.layer, ProjectionStore.layer).pipe(
 
 const seedAcpThread = Effect.fn(function* (
   sessionId: string,
-  state: { readonly imported: boolean; readonly ran: boolean; readonly nativeId?: string },
+  state: {
+    readonly imported: boolean;
+    readonly ran: boolean;
+    readonly nativeId?: string;
+    readonly projectId?: ProjectId;
+  },
 ) {
   const sink = yield* EventSink.EventSinkV2;
   const now = DateTime.makeUnsafe("2026-10-23T00:00:00.000Z");
@@ -2379,7 +2385,7 @@ const seedAcpThread = Effect.fn(function* (
     createdBy: "user",
     creationSource: "web",
     id: threadId,
-    projectId: acpProjectId,
+    projectId: state.projectId ?? acpProjectId,
     title: sessionId,
     providerInstanceId: acpInstanceId,
     modelSelection: { instanceId: acpInstanceId, model: "default" },
@@ -2463,8 +2469,9 @@ const seedAcpThread = Effect.fn(function* (
   return threadId;
 });
 
-it.effect("ACP session RPCs list a thread missing its history and repair it on import", () =>
+it.effect("ACP session RPCs import, repair, and reopen sessions in their owning projects", () =>
   Effect.gen(function* () {
+    const sink = yield* EventSink.EventSinkV2;
     const projections = yield* ProjectionStore.ProjectionStoreV2;
     const sql = yield* SqlClient.SqlClient;
     const pending = yield* seedAcpThread("pending", { imported: false, ran: false });
@@ -2478,6 +2485,8 @@ it.effect("ACP session RPCs list a thread missing its history and repair it on i
     const repaired: Array<ThreadId> = [];
     const replayRoots: Array<string> = [];
     const deleted: Array<string> = [];
+    const launched: Array<ProjectId> = [];
+    let scratchLookups = 0;
     const session = (sessionId: string) => ({
       sessionId,
       cwd: "/workspace/acp",
@@ -2510,26 +2519,34 @@ it.effect("ACP session RPCs list a thread missing its history and repair it on i
       layerUnusedConfigRpcServices,
       Layer.fresh(layerConfigSources),
       Layer.mock(ExternalLauncher.ExternalLauncher)({}),
-      Layer.mock(ProviderRegistry.ProviderRegistry)({}),
+      Layer.mock(ProviderRegistry.ProviderRegistry)({ getProviders: Effect.succeed([]) }),
       Layer.mock(UsageLimitSources.UsageLimitSources)({}),
       Layer.mock(RemoteOpenTargets.RemoteOpenTargets)({}),
       Layer.mock(DirectEndpoints.DirectEndpoints)({}),
-      Layer.mock(ManagedProjectFolders.ManagedProjectFolders)({ namedProjectsRoot: "/unused" }),
+      Layer.mock(ManagedProjectFolders.ManagedProjectFolders)({
+        namedProjectsRoot: "/unused",
+        ensureScratchProject: Effect.sync(() => {
+          scratchLookups++;
+          return { projectId: noProjectId };
+        }),
+      }),
       Layer.mock(ScratchThreadPromotion.ScratchThreadPromotion)({}),
       Layer.mock(ServerEnvironment.ServerEnvironment)({}),
       Layer.mock(EnvironmentAuth.EnvironmentAuth)({}),
       Layer.mock(ProjectService.ProjectService)({
-        getById: (projectId) =>
-          Effect.succeedSome({
+        getById: (projectId) => {
+          if (projectId !== acpProjectId && projectId !== noProjectId) return Effect.succeedNone;
+          return Effect.succeedSome({
             id: projectId,
             title: "ACP",
-            workspaceRoot: projectId === acpProjectId ? "/workspace/acp" : "/workspace/other",
+            workspaceRoot: projectId === acpProjectId ? "/workspace/acp" : "/t3-home/scratch",
             defaultModelSelection: null,
             scripts: [],
             createdAt: "2026-10-23T00:00:00.000Z",
             updatedAt: "2026-10-23T00:00:00.000Z",
             deletedAt: null,
-          }),
+          });
+        },
       }),
       Layer.mock(ProviderInstanceRegistry.ProviderInstanceRegistry)({
         getInstance: () => Effect.succeed(instance),
@@ -2547,8 +2564,24 @@ it.effect("ACP session RPCs list a thread missing its history and repair it on i
               ),
             ),
       }),
-      // Repairing an existing thread must not launch another one.
-      Layer.mock(ThreadLaunchService.ThreadLaunchService)({}),
+      Layer.mock(ServerRuntimeStartup.ServerRuntimeStartup)({ enqueueCommand: (effect) => effect }),
+      Layer.mock(ThreadLaunchService.ThreadLaunchService)({
+        launch: ({ projectId, importedNativeThread }) =>
+          Effect.gen(function* () {
+            const sessionId = importedNativeThread?.ref.nativeId;
+            assert.isDefined(sessionId);
+            launched.push(projectId);
+            const threadId = yield* seedAcpThread(sessionId!, {
+              imported: sessionId !== "unavailable",
+              ran: false,
+              nativeId: sessionId!,
+              projectId,
+            });
+            const projection = yield* projections.getThreadProjection(threadId);
+            assert.isNotNull(projection);
+            return { threadId, projection: projection!, resumed: false };
+          }).pipe(Effect.provideService(EventSink.EventSinkV2, sink), Effect.orDie),
+      }),
       Layer.mock(AgentSessionImporter.AgentSessionImporter)({
         importNativeHistory: ({ threadId, workspaceRoot }) =>
           Effect.sync(() => {
@@ -2632,7 +2665,7 @@ it.effect("ACP session RPCs list a thread missing its history and repair it on i
     assert.match(unverifiedOwner.message, /local runs and no verified native history/i);
     const attached = yield* client[WS_METHODS.serverImportAcpRegistrySession]({
       ...strictImport,
-      projectId: ProjectId.make("project:secondary-acp"),
+      projectId: ProjectId.make("project:unavailable"),
       sessionId: "complete",
     });
     assert.equal(replayRoots.at(-1), "/workspace/acp");
@@ -2641,6 +2674,51 @@ it.effect("ACP session RPCs list a thread missing its history and repair it on i
       imported: false,
       nativeHistory: { projectId: acpProjectId },
     });
+    const projectlessImport = { instanceId: acpInstanceId, requireNativeHistory: true } as const;
+    const projectlessReopen = yield* client[WS_METHODS.serverImportAcpRegistrySession]({
+      ...projectlessImport,
+      sessionId: "complete",
+    });
+    assert.deepEqual(projectlessReopen, attached);
+    assert.deepEqual(launched, []);
+    assert.equal(scratchLookups, 0);
+
+    const invalidOverride = yield* client[WS_METHODS.serverImportAcpRegistrySession]({
+      ...strictImport,
+      projectId: ProjectId.make("project:unavailable"),
+      sessionId: "new",
+    }).pipe(Effect.flip);
+    assert.equal(invalidOverride.reason, "project_not_found");
+
+    const first = yield* client[WS_METHODS.serverImportAcpRegistrySession]({
+      ...projectlessImport,
+      sessionId: "new",
+    });
+    assert.deepEqual(first, {
+      threadId: acpThreadId("new"),
+      imported: true,
+      nativeHistory: { projectId: noProjectId },
+    });
+    assert.equal(replayRoots.at(-1), "/t3-home/scratch");
+    const repeat = yield* client[WS_METHODS.serverImportAcpRegistrySession]({
+      ...strictImport,
+      sessionId: "new",
+    });
+    assert.deepEqual(repeat, { ...first, imported: false });
+    assert.deepEqual(launched, [noProjectId]);
+    assert.equal(scratchLookups, 1);
+
+    const explicit = yield* client[WS_METHODS.serverImportAcpRegistrySession]({
+      ...strictImport,
+      sessionId: "explicit",
+    });
+    assert.deepEqual(explicit.nativeHistory, { projectId: acpProjectId });
+    const unavailable = yield* client[WS_METHODS.serverImportAcpRegistrySession]({
+      ...projectlessImport,
+      sessionId: "unavailable",
+    }).pipe(Effect.flip);
+    assert.match(unavailable.message, /history is still unavailable/i);
+
     const deletion = yield* client[WS_METHODS.serverDeleteAcpRegistrySession]({
       instanceId: acpInstanceId,
       projectId: acpProjectId,

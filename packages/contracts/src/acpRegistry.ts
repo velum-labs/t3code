@@ -173,14 +173,21 @@ export type AcpRegistryListSessionsResult = typeof AcpRegistryListSessionsResult
 
 export const AcpRegistryImportSessionInput = Schema.Struct({
   instanceId: ProviderInstanceId,
-  projectId: ProjectId,
+  projectId: Schema.optionalKey(ProjectId),
   sessionId: AcpRegistrySessionId,
   requireNativeHistory: Schema.optionalKey(Schema.Literal(true)),
   title: Schema.optionalKey(Schema.NullOr(TrimmedNonEmptyString.check(Schema.isMaxLength(1_024)))),
   updatedAt: Schema.optionalKey(
     Schema.NullOr(TrimmedNonEmptyString.check(Schema.isMaxLength(128))),
   ),
-});
+}).check(
+  Schema.makeFilter(
+    ({ projectId, requireNativeHistory }) =>
+      projectId !== undefined ||
+      requireNativeHistory === true ||
+      "A project is required for import.",
+  ),
+);
 export type AcpRegistryImportSessionInput = typeof AcpRegistryImportSessionInput.Type;
 
 export const AcpRegistryImportSessionResult = Schema.Struct({
