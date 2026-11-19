@@ -1,4 +1,9 @@
+import * as NodeSocket from "@effect/platform-node/NodeSocket";
 import {
+  AcpRegistryImportSessionInput,
+  AuthOrchestrationOperateScope,
+  ORCHESTRATION_PROTOCOL_QUERY_PARAM,
+  ORCHESTRATION_PROTOCOL_VERSION_TEXT,
   OrchestratorMcpFailure,
   OrchestratorMcpThreadListResult,
   OrchestratorMcpThreadReadResult,
@@ -8,6 +13,8 @@ import {
   RunId,
   ThreadId,
   TrimmedNonEmptyString,
+  WS_METHODS,
+  WsRpcGroup,
   type OrchestratorMcpThreadListItem,
   type OrchestratorMcpThreadRun,
   type OrchestratorMcpThreadStatus,
@@ -15,6 +22,7 @@ import {
 } from "@t3tools/contracts";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as Console from "effect/Console";
+import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
@@ -26,6 +34,7 @@ import * as Schema from "effect/Schema";
 import * as Stdio from "effect/Stdio";
 import * as Stream from "effect/Stream";
 import { Argument, Command, Flag, GlobalFlag } from "effect/cli";
+import { RpcClient, RpcSerialization } from "effect/rpc";
 
 import * as EnvironmentAuth from "../auth/EnvironmentAuth.ts";
 import * as ServerConfig from "../config.ts";
@@ -33,6 +42,7 @@ import { mcpToolSession, type McpToolSession } from "../mcp/AcpMcpStdioBridge.ts
 import { expandHomePath } from "../os-jank.ts";
 import * as ProcessRunner from "../processRunner.ts";
 import { readLiveServerRuntimeState } from "../serverRuntimeState.ts";
+import { openDesktopThread } from "./app.ts";
 import { projectLocationFlags, resolveCliAuthConfig } from "./config.ts";
 
 /**
@@ -217,7 +227,7 @@ export type ThreadTools = ReturnType<typeof makeThreadTools>;
  */
 const withThreadTools = Effect.fn("cli.thread.withThreadTools")(function* <A, E, R>(
   flags: { readonly baseDir: Option.Option<string>; readonly json: boolean },
-  run: (tools: ThreadTools) => Effect.Effect<A, E, R>,
+  run: (tools: ThreadTools, origin: string) => Effect.Effect<A, E, R>,
 ) {
   const logLevel = yield* GlobalFlag.LogLevel;
   const config = yield* resolveCliAuthConfig(flags, logLevel, { quietLogs: flags.json });
@@ -246,7 +256,7 @@ const withThreadTools = Effect.fn("cli.thread.withThreadTools")(function* <A, E,
       authorization: `Bearer ${issued.token}`,
       clientName: "t3-thread-cli",
     }).pipe(Effect.mapError((cause) => new ThreadServerUnreachableError({ origin, cause })));
-    return yield* run(makeThreadTools(session, origin));
+    return yield* run(makeThreadTools(session, origin), origin);
   }).pipe(
     Effect.scoped,
     Effect.provideService(References.MinimumLogLevel, minimumLogLevel),
@@ -772,6 +782,7 @@ const messageArgument = Argument.String("message").pipe(
 const threadArgument = Argument.String("thread").pipe(Argument.withDescription("Thread id."));
 
 const decodeThreadIdValue = Schema.decodeUnknownEffect(ThreadId);
+const decodeAcpImportInput = Schema.decodeEffect(AcpRegistryImportSessionInput);
 const decodeTitle = Schema.decodeUnknownEffect(TrimmedNonEmptyString);
 const decodeThreadId = (value: string) =>
   decodeThreadIdValue(value.trim()).pipe(
@@ -986,9 +997,112 @@ const threadShowCommand = Command.make("show", {
   ),
 );
 
+const importAcpSession = Effect.fn("cli.thread.importAcpSession")(function* (
+  origin: string,
+  input: AcpRegistryImportSessionInput,
+) {
+  const environmentAuth = yield* EnvironmentAuth.EnvironmentAuth;
+  const issued = yield* Effect.acquireRelease(
+    environmentAuth.issueSession({
+      scopes: [AuthOrchestrationOperateScope],
+      subject: "cli",
+      label: "t3 thread attach",
+      ttl: Duration.minutes(3),
+    }),
+    (session) =>
+      environmentAuth.revokeSession(session.sessionId).pipe(Effect.ignore({ log: true })),
+  );
+  const socketUrl = new URL("/ws", origin);
+  socketUrl.protocol = socketUrl.protocol === "https:" ? "wss:" : "ws:";
+  socketUrl.searchParams.set(
+    ORCHESTRATION_PROTOCOL_QUERY_PARAM,
+    ORCHESTRATION_PROTOCOL_VERSION_TEXT,
+  );
+  const socket = NodeSocket.layerWebSocket(socketUrl.href, {
+    headers: { Authorization: `Bearer ${issued.token}` },
+  });
+  const protocol = yield* Layer.build(
+    RpcClient.layerProtocolSocket({
+      retryTransientErrors: false,
+      pingTimeout: "15 seconds",
+    }).pipe(Layer.provide(Layer.mergeAll(socket, RpcSerialization.layerJson))),
+  );
+  const client = yield* RpcClient.make(WsRpcGroup).pipe(Effect.provide(protocol));
+  return yield* client[WS_METHODS.serverImportAcpRegistrySession](input).pipe(
+    Effect.timeout("135 seconds"),
+    Effect.mapError(
+      (cause) =>
+        new ThreadToolFailedError({
+          tool: "attach",
+          detail:
+            cause._tag === "AcpRegistryOperationError"
+              ? cause.message
+              : "Could not verify the ACP session in the running T3 Code server. Retry with the matching desktop and CLI versions.",
+        }),
+    ),
+  );
+});
+
+const threadAttachCommand = Command.make("attach", {
+  ...projectLocationFlags,
+  sessionId: Argument.String("session-id").pipe(
+    Argument.withDescription("Existing native ACP session ID."),
+  ),
+  provider: Flag.String("provider").pipe(
+    Flag.withDescription("Configured ACP provider instance ID."),
+  ),
+  project: Argument.String("project").pipe(
+    Argument.withDescription("Project ID or directory. Default: current directory."),
+    Argument.optional,
+  ),
+  json: jsonFlag,
+}).pipe(
+  Command.withDescription("Import an existing ACP session and open it in the desktop app."),
+  Command.withHandler((flags) =>
+    withThreadTools(
+      flags,
+      Effect.fnUntraced(function* (tools, origin) {
+        const project = yield* resolveProject(
+          tools,
+          Option.getOrElse(flags.project, () => "."),
+        );
+        const input = yield* decodeAcpImportInput({
+          instanceId: flags.provider,
+          projectId: project.id,
+          sessionId: flags.sessionId,
+          requireNativeHistory: true,
+        }).pipe(
+          Effect.mapError(
+            () => new ThreadUsageError({ detail: "Invalid ACP provider or session ID." }),
+          ),
+        );
+        const result = yield* importAcpSession(origin, input);
+        if (result.nativeHistory === undefined) {
+          return yield* new ThreadToolFailedError({
+            tool: "attach",
+            detail:
+              "The server could not verify native session history. Update T3 Code, then retry.",
+          });
+        }
+        const projectId = result.nativeHistory.projectId;
+        yield* openDesktopThread({ baseDir: flags.baseDir, projectId, threadId: result.threadId });
+        if (flags.json) {
+          return yield* printJson({
+            threadId: result.threadId,
+            projectId,
+            imported: result.imported,
+          });
+        }
+        yield* Console.log(`Opened ACP session in T3 Code (${result.threadId}).`);
+      }),
+    ).pipe(reportThreadErrors),
+  ),
+);
+
 export const threadCommand = Command.make("thread").pipe(
   Command.withDescription("Start, message, and read threads on the running server."),
   Command.withSubcommands([
+    threadAttachCommand,
     threadListCommand,
     threadStartCommand,
     threadSendCommand,

@@ -30,6 +30,7 @@ function dependencies(
     }),
     createProject: vi.fn(async () => createdProjectId),
     waitForProject: vi.fn(async () => undefined),
+    openExistingThread: vi.fn(async () => undefined),
     openThread: vi.fn(async () => ({ threadId })),
     ...overrides,
   };
@@ -57,6 +58,32 @@ describe("desktop app activation", () => {
 
     expect(order).toEqual(["create", "project-event", "open-thread"]);
     expect(response).toMatchObject({ ok: true, projectId: createdProjectId });
+  });
+
+  it("focuses the imported thread without launching a new one", async () => {
+    const deps = dependencies();
+    const response = await handleDesktopAppActivationRequest(
+      {
+        version: 1,
+        requestId: request.requestId,
+        platform: request.platform,
+        type: "open-thread",
+        projectId: existingProjectId,
+        threadId,
+      },
+      deps,
+    );
+
+    expect(response).toEqual({
+      version: 1,
+      requestId: request.requestId,
+      ok: true,
+      projectId: existingProjectId,
+      threadId,
+    });
+    expect(deps.openExistingThread).toHaveBeenCalledExactlyOnceWith({ environmentId, threadId });
+    expect(deps.createProject).not.toHaveBeenCalled();
+    expect(deps.openThread).not.toHaveBeenCalled();
   });
 
   it("rejects a Windows path when the primary environment is WSL", async () => {

@@ -144,7 +144,7 @@ const make = Effect.gen(function* () {
     return { instance, manager: instance.acpSessionManagement };
   });
 
-  const importSession = Effect.fn("AcpRegistrySessions.importSession")(function* (
+  const launchOrFindImport = Effect.fn("AcpRegistrySessions.launchOrFindImport")(function* (
     input: AcpRegistryImportSessionInput,
   ) {
     const { workspaceRoot } = yield* project(input.projectId);
@@ -185,17 +185,26 @@ const make = Effect.gen(function* () {
         historyOrigin: existing.historyOrigin,
         hasRun: existing.latestRunId !== null,
       });
-      yield* agentSessionImporter.importNativeHistory({ threadId, workspaceRoot }).pipe(
-        Effect.mapError(
-          (cause) =>
-            new AcpRegistryOperationError({
-              reason: "session_import_failed",
-              message: "Could not import the ACP session history.",
-              cause,
-            }),
-        ),
-      );
-      return { threadId, imported: repairing } as const;
+      const added = yield* agentSessionImporter
+        .importNativeHistory({
+          threadId,
+          workspaceRoot,
+          ...(input.requireNativeHistory ? { refresh: true } : {}),
+        })
+        .pipe(
+          Effect.mapError(
+            (cause) =>
+              new AcpRegistryOperationError({
+                reason: "session_import_failed",
+                message: "Could not import the ACP session history.",
+                cause,
+              }),
+          ),
+        );
+      return {
+        threadId,
+        imported: repairing || (input.requireNativeHistory === true && added > 0),
+      } as const;
     }
 
     const provider = (yield* providerRegistry.getProviders).find(
@@ -252,17 +261,60 @@ const make = Effect.gen(function* () {
         cause: launched.failure,
       });
     }
-    // The thread is usable without its history, so a failed read only logs.
-    yield* agentSessionImporter.importNativeHistory({ threadId, workspaceRoot }).pipe(
-      Effect.catch((cause) =>
-        Effect.logWarning("Could not import ACP session history", {
-          instanceId: input.instanceId,
-          sessionId: input.sessionId,
-          cause,
-        }),
+    const importHistory = agentSessionImporter.importNativeHistory({ threadId, workspaceRoot });
+    if (input.requireNativeHistory) {
+      yield* importHistory.pipe(
+        Effect.mapError(
+          (cause) =>
+            new AcpRegistryOperationError({
+              reason: "session_import_failed",
+              message: "Could not import the ACP session history.",
+              cause,
+            }),
+        ),
+      );
+    } else {
+      yield* importHistory.pipe(
+        Effect.catch((cause) =>
+          Effect.logWarning("Could not import ACP session history", {
+            instanceId: input.instanceId,
+            sessionId: input.sessionId,
+            cause,
+          }),
+        ),
+      );
+    }
+    return { threadId, imported: true } as const;
+  });
+
+  const importSession = Effect.fn("AcpRegistrySessions.importSession")(function* (
+    input: AcpRegistryImportSessionInput,
+  ) {
+    const result = yield* launchOrFindImport(input);
+    if (!input.requireNativeHistory) return result;
+    const thread = yield* threadManagement.getThreadShell(result.threadId).pipe(
+      Effect.mapError(
+        (cause) =>
+          new AcpRegistryOperationError({
+            reason: "session_import_failed",
+            message: "Could not verify the ACP session history.",
+            cause,
+          }),
       ),
     );
-    return { threadId, imported: true } as const;
+    if (
+      thread === null ||
+      AgentSessionImporter.isNativeHistoryPending({
+        historyOrigin: thread.historyOrigin,
+        hasRun: thread.latestRunId !== null,
+      })
+    ) {
+      return yield* new AcpRegistryOperationError({
+        reason: "session_import_failed",
+        message: "The ACP session history is still unavailable. Retry the attach command.",
+      });
+    }
+    return { ...result, nativeHistory: { projectId: thread.projectId } };
   }, coordinator.withSessionMutation);
 
   return AcpRegistrySessions.of({ project, sessionManager, findOwner, importSession });

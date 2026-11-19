@@ -2550,7 +2550,7 @@ it.effect("ACP session RPCs list a thread missing its history and repair it on i
       Layer.mock(ThreadLaunchService.ThreadLaunchService)({}),
       Layer.mock(AgentSessionImporter.AgentSessionImporter)({
         importNativeHistory: ({ threadId }) =>
-          Effect.sync(() => repaired.push(threadId)).pipe(Effect.as(1)),
+          Effect.sync(() => repaired.push(threadId)).pipe(Effect.as(threadId === pending ? 1 : 0)),
       }),
       Layer.succeed(SqlClient.SqlClient, sql),
     );
@@ -2610,6 +2610,25 @@ it.effect("ACP session RPCs list a thread missing its history and repair it on i
     });
     assert.deepEqual(reopened, { threadId: owned, imported: false });
     assert.deepEqual(repaired, [pending]);
+    const strictImport = {
+      instanceId: acpInstanceId,
+      projectId: acpProjectId,
+      requireNativeHistory: true,
+    } as const;
+    const unverified = yield* client[WS_METHODS.serverImportAcpRegistrySession]({
+      ...strictImport,
+      sessionId: "pending",
+    }).pipe(Effect.flip);
+    assert.match(unverified.message, /history is still unavailable/i);
+    const attached = yield* client[WS_METHODS.serverImportAcpRegistrySession]({
+      ...strictImport,
+      sessionId: "complete",
+    });
+    assert.deepEqual(attached, {
+      threadId: complete,
+      imported: false,
+      nativeHistory: { projectId: acpProjectId },
+    });
     const deletion = yield* client[WS_METHODS.serverDeleteAcpRegistrySession]({
       instanceId: acpInstanceId,
       projectId: acpProjectId,

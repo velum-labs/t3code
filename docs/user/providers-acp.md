@@ -97,6 +97,11 @@ choose a project, and select **List sessions**. Importing one creates a determin
 backed by that native session. Importing the same agent session again returns the existing thread,
 including when another client performs the import.
 
+To import and open a session by ID from a local terminal, run
+`t3 thread attach <session-id> --provider <instance-id> [<project-directory>]`
+with the desktop app running. Repeating the command on an observer session opens the same thread
+and picks up new messages. The desktop app shows a snapshot taken at attach time.
+
 The thread keeps the native session's title and last-update value as provider metadata without
 overwriting a title you set in T3 Code. Agents that report ACP context usage drive the thread details
 context window and cumulative cost metadata. See

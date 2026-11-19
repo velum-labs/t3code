@@ -628,6 +628,8 @@ it.effect(
       const opened: Array<ProviderAdapter.ProviderAdapterV2OpenSessionInput> = [];
       let closed = false;
       let failRead = true;
+      let report: string | undefined;
+      let historyPrompt = "Fix the build";
       const replayed = (role: "user" | "assistant", text: string) => ({
         createdBy: role === "user" ? ("user" as const) : ("agent" as const),
         creationSource: "provider" as const,
@@ -662,10 +664,11 @@ it.effect(
                         runtimeRequests: [],
                         reasoningMessageIds: [MessageId.make("replayed:Check the build log")],
                         messages: [
-                          replayed("user", "Fix the build"),
+                          replayed("user", historyPrompt),
                           replayed("assistant", "Check the build log"),
                           replayed("assistant", "Fixed it"),
                           replayed("assistant", " "),
+                          ...(report === undefined ? [] : [replayed("assistant", report)]),
                         ],
                       }),
               } as Pick<ProviderAdapter.ProviderAdapterV2SessionRuntime, "readThreadSnapshot">;
@@ -725,6 +728,28 @@ it.effect(
         ["reasoning", null, "Check the build log"],
         ["assistant_message", null, "Fixed it"],
       ]);
+
+      const refreshHistory = importer.importNativeHistory({
+        threadId,
+        workspaceRoot: "/workspace/project",
+        refresh: true,
+      });
+      report = "The build also passed";
+      expect(yield* refreshHistory).toBe(1);
+      expect(yield* refreshHistory).toBe(0);
+
+      historyPrompt = "Altered earlier message";
+      expect((yield* Effect.flip(refreshHistory))._tag).toBe("NativeSessionHistoryChangedError");
+      const refreshed = yield* projections.getTimelinePage(threadId, {
+        view: "activity",
+        limit: 10,
+      });
+      expect(refreshed.items.slice(0, 3)).toEqual(page.items);
+      expect(refreshed.items[3]?.item).toMatchObject({
+        type: "assistant_message",
+        text: report,
+      });
+      expect(refreshed.items).toHaveLength(4);
     }).pipe(Effect.scoped, Effect.provide(persistence)),
 );
 

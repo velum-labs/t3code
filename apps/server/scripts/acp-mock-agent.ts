@@ -68,6 +68,7 @@ const emitEmptySuccessfulBash = process.env.T3_ACP_EMIT_EMPTY_SUCCESSFUL_BASH ==
 const emitEmptySuccessfulBashThenHang =
   process.env.T3_ACP_EMIT_EMPTY_SUCCESSFUL_BASH_THEN_HANG === "1";
 const failLoadSession = process.env.T3_ACP_FAIL_LOAD_SESSION === "1";
+const loadOnly = process.env.T3_ACP_LOAD_ONLY === "1";
 const failLoadSessionAfterConfigReplay =
   process.env.T3_ACP_FAIL_LOAD_SESSION_AFTER_CONFIG_REPLAY === "1";
 const emitLoadReplay = process.env.T3_ACP_EMIT_LOAD_REPLAY === "1";
@@ -635,6 +636,7 @@ const program = Effect.gen(function* () {
   yield* agent.handleCreateSession(() =>
     Effect.gen(function* () {
       yield* requireAuthentication();
+      if (loadOnly) return yield* AcpError.AcpRequestError.methodNotFound("session/new");
       if (newSessionErrorData !== undefined) {
         return yield* AcpError.AcpRequestError.internalError("Internal error", newSessionErrorData);
       }

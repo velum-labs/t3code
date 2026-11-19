@@ -85,6 +85,15 @@ class AgentSessionThreadModifiedError extends Schema.TaggedError<AgentSessionThr
   }
 }
 
+class NativeSessionHistoryChangedError extends Schema.TaggedError<NativeSessionHistoryChangedError>()(
+  "NativeSessionHistoryChangedError",
+  { threadId: ThreadId },
+) {
+  override get message(): string {
+    return `Native history for thread ${this.threadId} is no longer an append-only transcript.`;
+  }
+}
+
 // ACP imports read the history while holding the session-mutation lock, and an agent can
 // leave session/resume or initialize unanswered. Longer than session/load's own deadline.
 const NATIVE_HISTORY_READ_TIMEOUT = "2 minutes";
@@ -501,51 +510,74 @@ const make = Effect.gen(function* () {
   /**
    * Loading a native session replays its history only into the adapter's own
    * snapshot, so copy that snapshot into the thread as run-less history. The
-   * `v1_import` origin keeps it in forks and marks the import done, so a call
-   * after a failed read repairs the thread and any later call does nothing.
+   * `v1_import` origin keeps it in forks and marks the first import complete.
+   * An explicit refresh appends native history while the thread has no T3 runs.
    */
   const importNativeHistory = Effect.fn("importNativeHistoryV2")(function* (input: {
     readonly threadId: ThreadId;
     readonly workspaceRoot: string;
+    readonly refresh?: true;
   }) {
-    const pendingThread = Effect.map(
-      orchestrator.getThreadRecords(input.threadId, ["providerThreads", "runs"]),
-      (records) =>
-        isNativeHistoryPending({
-          historyOrigin: records.thread.historyOrigin,
-          hasRun: records.runs.length > 0,
-        })
-          ? records
-          : null,
-    );
+    const canReplay = (thread: OrchestrationV2AppThread, hasRun: boolean) =>
+      !hasRun && (input.refresh === true || thread.historyOrigin !== "v1_import");
+
     // Thread commands write whole thread rows, so hold their lock from the
     // re-read through the write to keep both this marker and their changes.
     const commit = (messages: ReadonlyArray<HistoryMessage>) =>
       threadCommands.withLock(
         input.threadId,
         Effect.gen(function* () {
-          const current = yield* pendingThread;
-          if (current === null) return 0;
-          yield* eventSink.write({
-            events: [
-              ...messages.flatMap((message, index) =>
-                messageEvents({ threadId: input.threadId, index, message }),
-              ),
-              {
-                id: EventId.make(`${IMPORT_EVENT_PREFIX}:thread:${input.threadId}:native-history`),
-                type: "thread.metadata-updated",
-                threadId: input.threadId,
-                providerInstanceId: current.thread.providerInstanceId,
-                occurredAt: yield* DateTime.now,
-                payload: { ...current.thread, historyOrigin: "v1_import" },
-              },
-            ],
-          });
-          return messages.length;
+          const current = yield* orchestrator.getThreadRecords(input.threadId, [
+            "runs",
+            "turnItems",
+          ]);
+          if (!canReplay(current.thread, current.runs.length > 0)) return 0;
+          const imported = current.turnItems
+            .filter((item) =>
+              item.id.startsWith(`${IMPORT_EVENT_PREFIX}:turn-item:${input.threadId}:`),
+            )
+            .filter(
+              (item) =>
+                item.type === "user_message" ||
+                item.type === "assistant_message" ||
+                item.type === "reasoning",
+            )
+            .toSorted((left, right) => left.ordinal - right.ordinal);
+          for (const [index, item] of imported.entries()) {
+            const role =
+              item.type === "user_message"
+                ? "user"
+                : item.type === "assistant_message"
+                  ? "assistant"
+                  : "reasoning";
+            const next = messages[index];
+            if (item.ordinal !== index + 1 || next?.role !== role || next.text !== item.text) {
+              return yield* new NativeSessionHistoryChangedError({ threadId: input.threadId });
+            }
+          }
+          const added = messages.slice(imported.length);
+          const events = added.flatMap((message, index) =>
+            messageEvents({ threadId: input.threadId, index: imported.length + index, message }),
+          );
+          if (current.thread.historyOrigin !== "v1_import") {
+            events.push({
+              id: EventId.make(`${IMPORT_EVENT_PREFIX}:thread:${input.threadId}:native-history`),
+              type: "thread.metadata-updated",
+              threadId: input.threadId,
+              providerInstanceId: current.thread.providerInstanceId,
+              occurredAt: yield* DateTime.now,
+              payload: { ...current.thread, historyOrigin: "v1_import" },
+            });
+          }
+          if (events.length > 0) yield* eventSink.write({ events });
+          return added.length;
         }),
       );
-    const records = yield* pendingThread;
-    if (records === null) return 0;
+    const records = yield* orchestrator.getThreadRecords(input.threadId, [
+      "providerThreads",
+      "runs",
+    ]);
+    if (!canReplay(records.thread, records.runs.length > 0)) return 0;
     const { thread, providerThreads } = records;
     const providerThread = providerThreads.find(
       (candidate) => candidate.appThreadId === input.threadId && candidate.nativeThreadRef !== null,

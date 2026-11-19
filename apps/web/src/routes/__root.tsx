@@ -187,10 +187,7 @@ function RootRouteBranch() {
   const appHosts = (
     <>
       {primaryEnvironmentAuthenticated || localEnvironmentDisabled ? (
-        <>
-          <DesktopAppActivationCoordinator />
-          <DesktopWebLinkCoordinator />
-        </>
+        <DesktopWebLinkCoordinator />
       ) : null}
       {isElectron ? <RunningThreadKeepAlive /> : null}
       <RelayClientInstallDialog />
@@ -220,6 +217,10 @@ function RootRouteBranch() {
   return (
     <>
       <ChatGptWelcomeCoordinator />
+      {/* Opening a thread can leave Welcome before the activation acknowledgement is sent. */}
+      {primaryEnvironmentAuthenticated || localEnvironmentDisabled ? (
+        <DesktopAppActivationCoordinator />
+      ) : null}
       {isWelcome ? (
         <>
           {appHosts}

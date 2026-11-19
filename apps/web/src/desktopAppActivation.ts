@@ -6,6 +6,7 @@ import type {
   ExecutionEnvironmentPlatformOs,
   ProjectId,
   ScopedProjectRef,
+  ScopedThreadRef,
   ThreadId,
 } from "@t3tools/contracts";
 
@@ -31,6 +32,7 @@ export interface DesktopAppActivationDependencies {
     workspaceRoot: string,
   ) => Promise<ProjectId>;
   readonly waitForProject: (projectRef: ScopedProjectRef) => Promise<void>;
+  readonly openExistingThread: (threadRef: ScopedThreadRef) => Promise<void>;
   readonly openThread: (
     projectRef: ScopedProjectRef,
   ) => Promise<{ readonly threadId: ThreadId } | null>;
@@ -74,6 +76,28 @@ export async function handleDesktopAppActivationRequest(
       "platform-mismatch",
       `The command path is for ${requestPlatform}, but the desktop app's primary environment uses ${target.platform}. Cross-platform path mapping is not supported.`,
     );
+  }
+
+  if (request.type === "open-thread") {
+    try {
+      await dependencies.openExistingThread({
+        environmentId: target.environmentId,
+        threadId: request.threadId,
+      });
+      return {
+        version: 1,
+        requestId: request.requestId,
+        ok: true,
+        projectId: request.projectId,
+        threadId: request.threadId,
+      };
+    } catch (error) {
+      return failure(
+        request.requestId,
+        "thread-open-failed",
+        errorMessage(error, "T3 Code could not open the imported thread."),
+      );
+    }
   }
 
   let projectId = dependencies.findProject(target.environmentId, request.workspaceRoot)?.id ?? null;

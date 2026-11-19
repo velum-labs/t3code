@@ -9,19 +9,21 @@ import * as NodePath from "node:path";
 import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, it } from "@effect/vitest";
-import type { DesktopAppActivationRequest } from "@t3tools/contracts";
+import { ProjectId, ThreadId, type DesktopAppActivationRequest } from "@t3tools/contracts";
 import { resolveDesktopAppControlAddress } from "@t3tools/shared/desktopAppControl";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as NetService from "@t3tools/shared/Net";
 import * as ConfigProvider from "effect/ConfigProvider";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 import * as TestConsole from "effect/testing/TestConsole";
 import { Command } from "effect/cli";
 import { describe, expect } from "vite-plus/test";
 
 import { makeCli } from "../binCli.ts";
+import { openDesktopThread } from "./app.ts";
 import { PersistedServerRuntimeState } from "../serverRuntimeState.ts";
 
 const liveProcess = Effect.acquireRelease(
@@ -298,11 +300,40 @@ describe("t3 app", () => {
         yield* runCli(["app"], { T3CODE_HOME: baseDir });
         yield* runCli(["app", explicitPath, "--base-dir", baseDir]);
 
-        expect(desktop.received.map((request) => request.workspaceRoot)).toEqual([
-          workingDirectory,
-          explicitPath,
-        ]);
+        expect(
+          desktop.received.map((request) =>
+            request.type === "open-workspace" ? request.workspaceRoot : null,
+          ),
+        ).toEqual([workingDirectory, explicitPath]);
         expect(desktop.received.every((request) => request.platform === platform)).toBe(true);
+      }).pipe(Effect.scoped),
+    ),
+  );
+
+  it.effect("opens exactly the imported thread through desktop activation", () =>
+    withTempDirectory("t3-open-thread-test-", (root) =>
+      Effect.gen(function* () {
+        const baseDir = NodePath.join(root, "t3-home");
+        const projectId = ProjectId.make("project-1");
+        const threadId = ThreadId.make("imported-acp-thread");
+        const desktop = yield* fakeDesktop({
+          baseDir,
+          reply: (request) => ({
+            version: 1,
+            requestId: request.requestId,
+            ok: true,
+            projectId,
+            threadId,
+          }),
+        });
+
+        yield* openDesktopThread({ baseDir: Option.some(baseDir), projectId, threadId }).pipe(
+          Effect.provide(Layer.merge(NodeCrypto.layer, NodeServices.layer)),
+        );
+
+        expect(desktop.received).toEqual([
+          expect.objectContaining({ type: "open-thread", projectId, threadId }),
+        ]);
       }).pipe(Effect.scoped),
     ),
   );
@@ -383,7 +414,7 @@ describe("t3 app", () => {
               _tag: "DesktopAppRequestFailedError",
               code: "project-create-failed",
               requestId: desktop.received[0]?.requestId,
-              workspaceRoot: yield* HostProcess.WorkingDirectory,
+              target: yield* HostProcess.WorkingDirectory,
               message: expect.stringContaining("project-create-failed"),
               cause: {
                 ok: false,

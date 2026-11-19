@@ -165,6 +165,16 @@ it.effect("does not sign in to whatever took over a dead server's port", () =>
     ]).pipe(Effect.flip);
 
     assert.strictEqual(error._tag, "ThreadServerNotRunningError");
+    const attachError = yield* Command.runWith(threadCommand, { version: "0.0.0" })([
+      "attach",
+      "existing-session",
+      "--provider",
+      "acpRegistry_test",
+      ".",
+      "--base-dir",
+      baseDir,
+    ]).pipe(Effect.flip);
+    assert.strictEqual(attachError._tag, "ThreadServerNotRunningError");
     assert.strictEqual(session.mock.calls.length, 0);
   }).pipe(
     Effect.scoped,

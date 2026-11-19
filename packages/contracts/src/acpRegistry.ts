@@ -175,6 +175,7 @@ export const AcpRegistryImportSessionInput = Schema.Struct({
   instanceId: ProviderInstanceId,
   projectId: ProjectId,
   sessionId: AcpRegistrySessionId,
+  requireNativeHistory: Schema.optionalKey(Schema.Literal(true)),
   title: Schema.optionalKey(Schema.NullOr(TrimmedNonEmptyString.check(Schema.isMaxLength(1_024)))),
   updatedAt: Schema.optionalKey(
     Schema.NullOr(TrimmedNonEmptyString.check(Schema.isMaxLength(128))),
@@ -185,6 +186,7 @@ export type AcpRegistryImportSessionInput = typeof AcpRegistryImportSessionInput
 export const AcpRegistryImportSessionResult = Schema.Struct({
   threadId: ThreadId,
   imported: Schema.Boolean,
+  nativeHistory: Schema.optionalKey(Schema.Struct({ projectId: ProjectId })),
 });
 export type AcpRegistryImportSessionResult = typeof AcpRegistryImportSessionResult.Type;
 

@@ -413,8 +413,8 @@ describe("ACP Registry probe", () => {
     );
   });
 
-  it.live.each(["succeeds", "fails"] as const)(
-    "deletes its health-probe session when deletion is advertised and %s",
+  it.live.each(["succeeds", "fails", "load-only"] as const)(
+    "probes a provider with session/new outcome %s without leaving a probe session",
     (deleteOutcome) =>
       Effect.gen(function* () {
         const fs = yield* FileSystem.FileSystem;
@@ -443,6 +443,7 @@ describe("ACP Registry probe", () => {
                   T3_ACP_V2_MANAGEMENT: "1",
                   T3_ACP_REQUEST_LOG_PATH: requestLogPath,
                   ...(deleteOutcome === "fails" ? { T3_ACP_FAIL_DELETE_SESSION: "1" } : {}),
+                  ...(deleteOutcome === "load-only" ? { T3_ACP_LOAD_ONLY: "1" } : {}),
                 },
               },
             }),
@@ -456,14 +457,17 @@ describe("ACP Registry probe", () => {
         }).pipe(Effect.provideService(AcpRegistrySupport.AcpRegistryCatalog, catalog));
         expect(result.probe.ready).toBe(true);
         expect(result.probe.sessionManagement.canDelete).toBe(true);
+        expect(result.probe.sessionManagement.canLoad).toBe(true);
 
         const requests = (yield* fs.readFileString(requestLogPath))
           .split("\n")
           .filter((line) => line.length > 0)
           .map((line) => JSON.parse(line));
-        expect(requests.filter((request) => request.method === "session/delete")).toEqual([
-          expect.objectContaining({ params: { sessionId: "mock-session-1" } }),
-        ]);
+        expect(requests.filter((request) => request.method === "session/delete")).toEqual(
+          deleteOutcome === "load-only"
+            ? []
+            : [expect.objectContaining({ params: { sessionId: "mock-session-1" } })],
+        );
       }).pipe(Effect.scoped, Effect.provide(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))),
   );
 

@@ -5,6 +5,7 @@ import {
 } from "@t3tools/client-runtime/state/projects";
 import { useAtomValue } from "@effect/atom-react";
 import type { DesktopAppActivationRequest } from "@t3tools/contracts";
+import { useNavigate } from "@tanstack/react-router";
 import { msg } from "gt-react";
 
 import { handleDesktopAppActivationRequest } from "../desktopAppActivation";
@@ -33,6 +34,7 @@ export function useOpenLocalWorkspace() {
     label: "project unarchive",
   });
   const openThread = useNewThreadHandler();
+  const navigate = useNavigate();
   const shellHasSnapshot = useEnvironmentShellHasSnapshot(localEnvironment?.environmentId ?? null);
   const ready =
     localEnvironment?.connection.phase === "connected" &&
@@ -80,6 +82,12 @@ export function useOpenLocalWorkspace() {
       },
       waitForProject: async (projectRef) => {
         await waitForProject(projectRef);
+      },
+      openExistingThread: async (threadRef) => {
+        await navigate({
+          to: "/$environmentId/$threadId",
+          params: { environmentId: threadRef.environmentId, threadId: threadRef.threadId },
+        });
       },
       openThread: (projectRef) => {
         const project = readProjects().find(

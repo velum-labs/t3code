@@ -317,7 +317,12 @@ export function normalizeAcpRegistryCommands(
 
 export function acpRegistryProbeResult(
   instanceId: ProviderInstanceId,
-  started: AcpSessionRuntime.AcpSessionRuntimeStartResult,
+  started:
+    | AcpSessionRuntime.AcpSessionRuntimeStartResult
+    | {
+        readonly initializeResult: EffectAcpSchema.InitializeResponse;
+        readonly sessionSetupResult: EffectAcpSchema.LoadSessionResponse;
+      },
   icon: string | null = null,
   spawn?: AcpRegistryAuthSpawnContext,
   liveConfiguration?: AcpRegistryLiveConfiguration,
@@ -510,6 +515,22 @@ export const probeAcpRegistryConfiguration = Effect.fn("AcpRegistryProbe.probeCo
       });
       const startResult = yield* Effect.result(runtime.start());
       if (Result.isFailure(startResult)) {
+        const error = startResult.failure;
+        if (
+          error._tag === "AcpRequestError" &&
+          error.code === -32601 &&
+          error.method === "session/new"
+        ) {
+          const initializeResult = yield* runtime.initialize();
+          if (initializeResult.agentCapabilities?.loadSession === true) {
+            return {
+              resolved,
+              started: { initializeResult, sessionSetupResult: {} },
+              commands: emptyAcpRegistryAvailableCommands(),
+              liveConfiguration: normalizeAcpRegistryLiveConfiguration([]),
+            };
+          }
+        }
         return yield* acpRegistryProbeFailure(
           startResult.failure,
           yield* Ref.get(authMethodsRef),

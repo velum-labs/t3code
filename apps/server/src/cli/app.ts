@@ -10,6 +10,8 @@ import {
   DesktopAppActivationResponse,
   type DesktopAppActivationPlatform,
   type DesktopAppActivationRequest,
+  type ProjectId,
+  type ThreadId,
 } from "@t3tools/contracts";
 import {
   resolveDesktopAppControlAddress,
@@ -55,12 +57,12 @@ export class DesktopAppUnreachableError extends Schema.TaggedError<DesktopAppUnr
   {
     candidateAddresses: Schema.Array(Schema.String),
     requestId: Schema.String,
-    workspaceRoot: Schema.String,
+    target: Schema.String,
     cause: Schema.Defect(),
   },
 ) {
   override get message(): string {
-    return "Could not reach the T3 Code desktop app. Start or update the desktop app on this machine, then run `t3 app` again. A running T3 Code server is not enough.";
+    return "Could not reach the T3 Code desktop app. Start or update the desktop app on this machine, then retry. A running T3 Code server is not enough.";
   }
 }
 
@@ -69,12 +71,12 @@ export class DesktopAppRequestFailedError extends Schema.TaggedError<DesktopAppR
   {
     code: DesktopAppActivationErrorCode,
     requestId: Schema.String,
-    workspaceRoot: Schema.String,
+    target: Schema.String,
     cause: Schema.Defect(),
   },
 ) {
   override get message(): string {
-    return `T3 Code could not open ${this.workspaceRoot} (${this.code}).`;
+    return `T3 Code could not open ${this.target} (${this.code}).`;
   }
 }
 
@@ -197,10 +199,14 @@ const appEnvironment = Config.all({
   sshTty: Config.String("SSH_TTY").pipe(Config.option),
 });
 
-const runAppCommand = Effect.fn("cli.app")(function* (flags: {
-  readonly baseDir: Option.Option<string>;
-  readonly workspaceRoot: Option.Option<string>;
-}) {
+type DesktopActivation =
+  | { readonly type: "open-workspace"; readonly workspaceRoot: string }
+  | { readonly type: "open-thread"; readonly projectId: ProjectId; readonly threadId: ThreadId };
+
+const activateDesktop = Effect.fn("cli.activateDesktop")(function* (
+  baseDirFlagValue: Option.Option<string>,
+  activation: DesktopActivation,
+) {
   const environment = yield* appEnvironment;
   const hostPlatform = yield* HostProcess.Platform;
   if (Option.isSome(environment.sshConnection) || Option.isSome(environment.sshTty)) {
@@ -211,12 +217,13 @@ const runAppCommand = Effect.fn("cli.app")(function* (flags: {
   }
 
   const path = yield* Path.Path;
-  const configuredBaseDir = Option.getOrUndefined(flags.baseDir) ?? environment.t3Home;
+  const configuredBaseDir = Option.getOrUndefined(baseDirFlagValue) ?? environment.t3Home;
   const baseDir = yield* resolveBaseDir(configuredBaseDir);
-  const allowDevFallback = Option.isNone(flags.baseDir) && !environment.t3Home?.trim();
-  const rawWorkspaceRoot =
-    Option.getOrUndefined(flags.workspaceRoot) ?? (yield* HostProcess.WorkingDirectory);
-  const workspaceRoot = path.resolve(yield* expandHomePath(rawWorkspaceRoot));
+  const allowDevFallback = Option.isNone(baseDirFlagValue) && !environment.t3Home?.trim();
+  const target =
+    activation.type === "open-workspace"
+      ? activation.workspaceRoot
+      : `thread ${activation.threadId}`;
   const userId = yield* HostProcess.UserId;
   const resolveAddress = (stateSubdirectory: "userdata" | "dev") =>
     resolveDesktopAppControlAddress({
@@ -231,8 +238,7 @@ const runAppCommand = Effect.fn("cli.app")(function* (flags: {
   const request: DesktopAppActivationRequest = {
     version: DESKTOP_APP_ACTIVATION_PROTOCOL_VERSION,
     requestId,
-    type: "open-workspace",
-    workspaceRoot,
+    ...activation,
     platform: hostPlatform,
   };
   const address = resolveAddress("userdata");
@@ -253,7 +259,7 @@ const runAppCommand = Effect.fn("cli.app")(function* (flags: {
             ? [address.address]
             : [address.address, fallbackAddress.address],
         requestId: request.requestId,
-        workspaceRoot,
+        target,
         cause,
       }),
   });
@@ -261,11 +267,43 @@ const runAppCommand = Effect.fn("cli.app")(function* (flags: {
     return yield* new DesktopAppRequestFailedError({
       code: response.code,
       requestId: response.requestId,
-      workspaceRoot,
+      target,
       cause: response,
     });
   }
 
+  return response;
+});
+
+export const openDesktopThread = Effect.fn("cli.openDesktopThread")(function* (input: {
+  readonly baseDir: Option.Option<string>;
+  readonly projectId: ProjectId;
+  readonly threadId: ThreadId;
+}) {
+  const response = yield* activateDesktop(input.baseDir, {
+    type: "open-thread",
+    projectId: input.projectId,
+    threadId: input.threadId,
+  });
+  if (response.projectId !== input.projectId || response.threadId !== input.threadId) {
+    return yield* new DesktopAppRequestFailedError({
+      code: "thread-open-failed",
+      requestId: response.requestId,
+      target: `thread ${input.threadId}`,
+      cause: response,
+    });
+  }
+});
+
+const runAppCommand = Effect.fn("cli.app")(function* (flags: {
+  readonly baseDir: Option.Option<string>;
+  readonly workspaceRoot: Option.Option<string>;
+}) {
+  const path = yield* Path.Path;
+  const rawWorkspaceRoot =
+    Option.getOrUndefined(flags.workspaceRoot) ?? (yield* HostProcess.WorkingDirectory);
+  const workspaceRoot = path.resolve(yield* expandHomePath(rawWorkspaceRoot));
+  yield* activateDesktop(flags.baseDir, { type: "open-workspace", workspaceRoot });
   yield* Console.log(`Opened ${workspaceRoot} in T3 Code.`);
 });
 
