@@ -2688,7 +2688,8 @@ it.effect("ACP session RPCs import, repair, and reopen sessions in their owning 
       projectId: ProjectId.make("project:unavailable"),
       sessionId: "new",
     }).pipe(Effect.flip);
-    assert.equal(invalidOverride.reason, "project_not_found");
+    assert.equal(invalidOverride._tag, "AcpRegistryOperationError");
+    assert.propertyVal(invalidOverride, "reason", "project_not_found");
 
     const first = yield* client[WS_METHODS.serverImportAcpRegistrySession]({
       ...projectlessImport,
