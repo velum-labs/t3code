@@ -2476,6 +2476,7 @@ it.effect("ACP session RPCs list a thread missing its history and repair it on i
       nativeId: "owned-session",
     });
     const repaired: Array<ThreadId> = [];
+    const replayRoots: Array<string> = [];
     const deleted: Array<string> = [];
     const session = (sessionId: string) => ({
       sessionId,
@@ -2518,11 +2519,11 @@ it.effect("ACP session RPCs list a thread missing its history and repair it on i
       Layer.mock(ServerEnvironment.ServerEnvironment)({}),
       Layer.mock(EnvironmentAuth.EnvironmentAuth)({}),
       Layer.mock(ProjectService.ProjectService)({
-        getById: () =>
+        getById: (projectId) =>
           Effect.succeedSome({
-            id: acpProjectId,
+            id: projectId,
             title: "ACP",
-            workspaceRoot: "/workspace/acp",
+            workspaceRoot: projectId === acpProjectId ? "/workspace/acp" : "/workspace/other",
             defaultModelSelection: null,
             scripts: [],
             createdAt: "2026-10-23T00:00:00.000Z",
@@ -2549,8 +2550,12 @@ it.effect("ACP session RPCs list a thread missing its history and repair it on i
       // Repairing an existing thread must not launch another one.
       Layer.mock(ThreadLaunchService.ThreadLaunchService)({}),
       Layer.mock(AgentSessionImporter.AgentSessionImporter)({
-        importNativeHistory: ({ threadId }) =>
-          Effect.sync(() => repaired.push(threadId)).pipe(Effect.as(threadId === pending ? 1 : 0)),
+        importNativeHistory: ({ threadId, workspaceRoot }) =>
+          Effect.sync(() => {
+            repaired.push(threadId);
+            replayRoots.push(workspaceRoot);
+            return threadId === pending ? 1 : 0;
+          }),
       }),
       Layer.succeed(SqlClient.SqlClient, sql),
     );
@@ -2620,10 +2625,17 @@ it.effect("ACP session RPCs list a thread missing its history and repair it on i
       sessionId: "pending",
     }).pipe(Effect.flip);
     assert.match(unverified.message, /history is still unavailable/i);
+    const unverifiedOwner = yield* client[WS_METHODS.serverImportAcpRegistrySession]({
+      ...strictImport,
+      sessionId: "owned-session",
+    }).pipe(Effect.flip);
+    assert.match(unverifiedOwner.message, /local runs and no verified native history/i);
     const attached = yield* client[WS_METHODS.serverImportAcpRegistrySession]({
       ...strictImport,
+      projectId: ProjectId.make("project:secondary-acp"),
       sessionId: "complete",
     });
+    assert.equal(replayRoots.at(-1), "/workspace/acp");
     assert.deepEqual(attached, {
       threadId: complete,
       imported: false,

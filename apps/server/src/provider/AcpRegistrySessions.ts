@@ -185,10 +185,14 @@ const make = Effect.gen(function* () {
         historyOrigin: existing.historyOrigin,
         hasRun: existing.latestRunId !== null,
       });
+      const importWorkspaceRoot =
+        existing.projectId === input.projectId
+          ? workspaceRoot
+          : (yield* project(existing.projectId)).workspaceRoot;
       const added = yield* agentSessionImporter
         .importNativeHistory({
           threadId,
-          workspaceRoot,
+          workspaceRoot: importWorkspaceRoot,
           ...(input.requireNativeHistory ? { refresh: true } : {}),
         })
         .pipe(
@@ -302,16 +306,13 @@ const make = Effect.gen(function* () {
           }),
       ),
     );
-    if (
-      thread === null ||
-      AgentSessionImporter.isNativeHistoryPending({
-        historyOrigin: thread.historyOrigin,
-        hasRun: thread.latestRunId !== null,
-      })
-    ) {
+    if (thread?.historyOrigin !== "v1_import") {
       return yield* new AcpRegistryOperationError({
         reason: "session_import_failed",
-        message: "The ACP session history is still unavailable. Retry the attach command.",
+        message:
+          thread?.latestRunId != null
+            ? "This session already has a T3 thread with local runs and no verified native history."
+            : "The ACP session history is still unavailable. Retry the attach command.",
       });
     }
     return { ...result, nativeHistory: { projectId: thread.projectId } };
