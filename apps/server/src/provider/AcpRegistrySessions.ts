@@ -22,6 +22,7 @@ import * as SqlClient from "effect/sql/SqlClient";
 import * as ThreadLaunchService from "../orchestration-v2/ThreadLaunchService.ts";
 import * as ThreadManagementService from "../orchestration-v2/ThreadManagementService.ts";
 import * as AgentSessionImporter from "../project/AgentSessionImporter.ts";
+import * as ManagedProjectFolders from "../project/ManagedProjectFolders.ts";
 import * as ProjectService from "../project/ProjectService.ts";
 import * as ServerRuntimeStartup from "../serverRuntimeStartup.ts";
 import * as ProviderInstanceRegistry from "./ProviderInstanceRegistry.ts";
@@ -66,6 +67,7 @@ export class AcpRegistrySessions extends Context.Service<
 
 const make = Effect.gen(function* () {
   const projectService = yield* ProjectService.ProjectService;
+  const managedFolders = yield* ManagedProjectFolders.ManagedProjectFolders;
   const providerInstances = yield* ProviderInstanceRegistry.ProviderInstanceRegistry;
   const providerRegistry = yield* ProviderRegistry.ProviderRegistry;
   const coordinator = yield* AcpRegistryRuntimeCoordinator.AcpRegistryRuntimeCoordinator;
@@ -147,7 +149,6 @@ const make = Effect.gen(function* () {
   const launchOrFindImport = Effect.fn("AcpRegistrySessions.launchOrFindImport")(function* (
     input: AcpRegistryImportSessionInput,
   ) {
-    const { workspaceRoot } = yield* project(input.projectId);
     const { instance } = yield* sessionManager(input.instanceId);
     const providerSnapshot = yield* instance.snapshot.getSnapshot;
     if (
@@ -185,14 +186,11 @@ const make = Effect.gen(function* () {
         historyOrigin: existing.historyOrigin,
         hasRun: existing.latestRunId !== null,
       });
-      const importWorkspaceRoot =
-        existing.projectId === input.projectId
-          ? workspaceRoot
-          : (yield* project(existing.projectId)).workspaceRoot;
+      const { workspaceRoot } = yield* project(existing.projectId);
       const added = yield* agentSessionImporter
         .importNativeHistory({
           threadId,
-          workspaceRoot: importWorkspaceRoot,
+          workspaceRoot,
           ...(input.requireNativeHistory ? { refresh: true } : {}),
         })
         .pipe(
@@ -211,6 +209,19 @@ const make = Effect.gen(function* () {
       } as const;
     }
 
+    const projectId =
+      input.projectId ??
+      (yield* managedFolders.ensureScratchProject.pipe(
+        Effect.mapError(
+          (cause) =>
+            new AcpRegistryOperationError({
+              reason: "session_import_failed",
+              message: "Could not open the No project group for this ACP session.",
+              cause,
+            }),
+        ),
+      )).projectId;
+    const { workspaceRoot } = yield* project(projectId);
     const provider = (yield* providerRegistry.getProviders).find(
       (candidate) => candidate.instanceId === input.instanceId,
     );
@@ -224,7 +235,7 @@ const make = Effect.gen(function* () {
         threadLaunch.launch({
           commandId,
           threadId,
-          projectId: input.projectId,
+          projectId,
           title: input.title ?? "Imported ACP session",
           modelSelection: { instanceId: input.instanceId, model },
           runtimeMode: "approval-required",
